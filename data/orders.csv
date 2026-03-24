@@ -1,3 +1,4 @@
 id,request_id,article,supplier,quantity,week,year,status,created_at
 1,2,epipremnum,sri lanka,1,1,2026,Open,2026-03-24T10:32:29
 2,3,croton,elstgeest,10000,1,2026,Open,2026-03-24T10:42:27
+3,1,dypsis,aardam,1,1,2026,Open,2026-03-24T10:44:02
