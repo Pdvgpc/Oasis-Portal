@@ -29,36 +29,62 @@ def gh_api(path: str) -> str:
     return f"https://api.github.com/repos/{SEC['GITHUB_OWNER']}/{SEC['GITHUB_REPO']}{path}"
 
 
-def gh_get_text(path):
-    r = requests.get(gh_api(f"/contents/{path}"), headers=gh_headers())
+def gh_get_text(path: str) -> Optional[str]:
+    try:
+        r = requests.get(gh_api(f"/contents/{path}"), headers=gh_headers(), timeout=15)
+    except Exception as e:
+        st.error(f"GitHub connection failed: {e}")
+        return ""
+
     if r.status_code == 200:
-        return base64.b64decode(r.json()["content"]).decode()
+        return base64.b64decode(r.json()["content"]).decode("utf-8", errors="ignore")
     if r.status_code == 404:
         return None
+
+    st.error(f"GitHub read error {r.status_code}: {r.text[:300]}")
     return ""
 
 
-def gh_put_csv(path, df, msg):
+def gh_put_csv(path: str, df: pd.DataFrame, msg: str) -> bool:
     url = gh_api(f"/contents/{path}")
-    r = requests.get(url, headers=gh_headers())
+
+    try:
+        r = requests.get(url, headers=gh_headers(), timeout=15)
+    except Exception as e:
+        st.error(f"GitHub pre-write read failed: {e}")
+        return False
+
     sha = r.json().get("sha") if r.status_code == 200 else None
 
     payload = {
         "message": msg,
-        "content": base64.b64encode(df.to_csv(index=False).encode()).decode(),
+        "content": base64.b64encode(df.to_csv(index=False).encode("utf-8")).decode("ascii"),
         "branch": "main",
     }
     if sha:
         payload["sha"] = sha
 
-    requests.put(url, headers=gh_headers(), data=json.dumps(payload))
+    try:
+        r2 = requests.put(url, headers=gh_headers(), data=json.dumps(payload), timeout=15)
+    except Exception as e:
+        st.error(f"GitHub write failed: {e}")
+        return False
+
+    if r2.status_code not in (200, 201):
+        st.error(f"GitHub write error {r2.status_code}: {r2.text[:300]}")
+        return False
+
+    return True
 
 
-def gh_get_csv(path):
+def gh_get_csv(path: str) -> pd.DataFrame:
     txt = gh_get_text(path)
     if txt is None or not txt.strip():
         return pd.DataFrame()
-    return pd.read_csv(StringIO(txt))
+    try:
+        return pd.read_csv(StringIO(txt))
+    except Exception:
+        return pd.DataFrame()
 
 
 # ============================================================
@@ -66,33 +92,39 @@ def gh_get_csv(path):
 # ============================================================
 DATA_DIR = SEC.get("DATA_DIR", "data")
 
-REQ = f"{DATA_DIR}/requests.csv"
-ORD = f"{DATA_DIR}/orders.csv"
-REJ = f"{DATA_DIR}/rejected_orders.csv"
+REQ_PATH = f"{DATA_DIR}/requests.csv"
+ORD_PATH = f"{DATA_DIR}/orders.csv"
+REJ_PATH = f"{DATA_DIR}/rejected_orders.csv"
 
 
 # ============================================================
 # Auth
 # ============================================================
 def load_auth():
-    with open(AUTH_YAML) as f:
-        return yaml.safe_load(f)
+    try:
+        with open(AUTH_YAML, "r", encoding="utf-8") as f:
+            return yaml.safe_load(f) or {}
+    except Exception:
+        st.error("auth.yaml not found or invalid.")
+        st.stop()
 
 
 def login():
-    users = load_auth()["credentials"]["usernames"]
+    users = load_auth().get("credentials", {}).get("usernames", {})
 
     if "user" in st.session_state:
         return st.session_state["user"]
 
     st.title("Oasis Portal")
+    st.subheader("Login")
 
-    u = st.text_input("Username")
-    p = st.text_input("Password", type="password")
+    username = st.text_input("Username")
+    password = st.text_input("Password", type="password")
 
-    if st.button("Login"):
-        if u in users and users[u]["password_plain"] == p:
-            st.session_state["user"] = u
+    if st.button("Login", use_container_width=True):
+        rec = users.get(username)
+        if rec and str(rec.get("password_plain", "")) == str(password):
+            st.session_state["user"] = username
             st.rerun()
         else:
             st.error("Wrong login")
@@ -103,14 +135,51 @@ def login():
 # ============================================================
 # Helpers
 # ============================================================
-def next_id(df):
-    return int(df["id"].max()) + 1 if not df.empty else 1
+def ensure_columns(df: pd.DataFrame, cols: list[str]) -> pd.DataFrame:
+    df = df.copy()
+    for c in cols:
+        if c not in df.columns:
+            df[c] = ""
+    return df[cols]
 
 
-def excel_bytes(df):
+def normalize_requests(df: pd.DataFrame) -> pd.DataFrame:
+    cols = ["id", "article", "quantity", "week", "year", "note", "created_at"]
+    df = ensure_columns(df if df is not None else pd.DataFrame(), cols)
+    for c in ["id", "quantity", "week", "year"]:
+        df[c] = pd.to_numeric(df[c], errors="coerce")
+    return df
+
+
+def normalize_orders(df: pd.DataFrame) -> pd.DataFrame:
+    cols = ["id", "request_id", "article", "supplier", "quantity", "week", "year", "status", "created_at"]
+    df = ensure_columns(df if df is not None else pd.DataFrame(), cols)
+    for c in ["id", "request_id", "quantity", "week", "year"]:
+        df[c] = pd.to_numeric(df[c], errors="coerce")
+    return df
+
+
+def normalize_rejected(df: pd.DataFrame) -> pd.DataFrame:
+    cols = ["id", "request_id", "article", "quantity", "week", "year", "note", "rejected_at"]
+    df = ensure_columns(df if df is not None else pd.DataFrame(), cols)
+    for c in ["id", "request_id", "quantity", "week", "year"]:
+        df[c] = pd.to_numeric(df[c], errors="coerce")
+    return df
+
+
+def next_id(df: pd.DataFrame) -> int:
+    if df.empty or "id" not in df.columns:
+        return 1
+    try:
+        return int(pd.to_numeric(df["id"], errors="coerce").fillna(0).max()) + 1
+    except Exception:
+        return 1
+
+
+def excel_bytes(df: pd.DataFrame) -> BytesIO:
     buf = BytesIO()
-    with pd.ExcelWriter(buf, engine="openpyxl") as w:
-        df.to_excel(w, index=False)
+    with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+        df.to_excel(writer, index=False, sheet_name="Orders")
     buf.seek(0)
     return buf
 
@@ -120,16 +189,18 @@ def excel_bytes(df):
 # ============================================================
 user = login()
 
-if "req" not in st.session_state:
-    st.session_state.req = gh_get_csv(REQ)
-if "ord" not in st.session_state:
-    st.session_state.ord = gh_get_csv(ORD)
-if "rej" not in st.session_state:
-    st.session_state.rej = gh_get_csv(REJ)
+if "requests_df" not in st.session_state:
+    st.session_state["requests_df"] = normalize_requests(gh_get_csv(REQ_PATH))
 
-req = st.session_state.req
-ord = st.session_state.ord
-rej = st.session_state.rej
+if "orders_df" not in st.session_state:
+    st.session_state["orders_df"] = normalize_orders(gh_get_csv(ORD_PATH))
+
+if "rejected_df" not in st.session_state:
+    st.session_state["rejected_df"] = normalize_rejected(gh_get_csv(REJ_PATH))
+
+requests_df = st.session_state["requests_df"]
+orders_df = st.session_state["orders_df"]
+rejected_df = st.session_state["rejected_df"]
 
 
 # ============================================================
@@ -143,14 +214,21 @@ if st.sidebar.button("Logout"):
 
 st.sidebar.markdown("---")
 
-st.session_state.setdefault("mobile", False)
-st.session_state.mobile = st.sidebar.checkbox("📱 Mobile mode", value=st.session_state.mobile)
+st.session_state.setdefault("mobile_mode", False)
+st.session_state["mobile_mode"] = st.sidebar.checkbox(
+    "📱 Mobile mode",
+    value=st.session_state["mobile_mode"]
+)
 
-if st.session_state.mobile:
+if st.session_state["mobile_mode"]:
     st.markdown(
-        """<style>
-        .block-container {max-width:700px;}
-        </style>""",
+        """
+        <style>
+        .block-container {
+            max-width: 700px;
+        }
+        </style>
+        """,
         unsafe_allow_html=True,
     )
 
@@ -160,152 +238,216 @@ if st.session_state.mobile:
 # ============================================================
 st.title("Oasis Portal")
 
-t1, t2, t3 = st.tabs(["Requests", "Orders", "Rejected"])
+tab_requests, tab_orders, tab_rejected = st.tabs(["Requests", "Orders", "Rejected"])
 
 
 # ============================================================
 # REQUESTS
 # ============================================================
-with t1:
+with tab_requests:
     st.subheader("New Request")
 
-    with st.form("req"):
-        a = st.text_input("Article")
-        q = st.number_input("Quantity", 1, 999, 1)
-        w = st.number_input("Week", 1, 53, 1)
-        y = st.number_input("Year", 2025, 2100, datetime.now().year)
-        n = st.text_input("Note")
+    with st.form("new_request_form"):
+        article = st.text_input("Article")
+        quantity = st.number_input("Quantity", min_value=1, max_value=999999, value=1, step=1)
+        week = st.number_input("Week", min_value=1, max_value=53, value=1, step=1)
+        year = st.number_input("Year", min_value=2025, max_value=2100, value=datetime.now().year, step=1)
+        note = st.text_input("Note")
 
-        if st.form_submit_button("Add", use_container_width=True):
-            if not a:
-                st.error("Article needed")
-            else:
-                new = pd.DataFrame([{
-                    "id": next_id(req),
-                    "article": a,
-                    "quantity": q,
-                    "week": w,
-                    "year": y,
-                    "note": n,
-                    "created_at": datetime.now()
-                }])
-                req = pd.concat([req, new])
-                gh_put_csv(REQ, req, "update")
-                st.session_state.req = req
+        add_request = st.form_submit_button("Add", use_container_width=True)
+
+    if add_request:
+        if not str(article).strip():
+            st.error("Article needed")
+        else:
+            new_row = pd.DataFrame([{
+                "id": next_id(requests_df),
+                "article": str(article).strip(),
+                "quantity": int(quantity),
+                "week": int(week),
+                "year": int(year),
+                "note": str(note).strip(),
+                "created_at": datetime.now().isoformat(timespec="seconds")
+            }])
+
+            new_requests_df = pd.concat([requests_df, new_row], ignore_index=True)
+
+            if gh_put_csv(REQ_PATH, normalize_requests(new_requests_df), "update requests"):
+                st.session_state["requests_df"] = normalize_requests(new_requests_df)
+                st.success("Request added")
                 st.rerun()
+            else:
+                st.error("Request could not be saved to GitHub.")
 
     st.markdown("---")
+    st.subheader("Create or Reject Request")
 
-    if not req.empty:
-        sel = st.selectbox(
-            "Select request",
-            req["id"].astype(str) + " | " + req["article"]
+    if requests_df.empty:
+        st.info("No open requests available.")
+    else:
+        select_df = requests_df.copy()
+        select_df["label"] = select_df.apply(
+            lambda r: f"#{int(r['id'])} | {str(r['article'])} | Qty {int(r['quantity']) if pd.notna(r['quantity']) else 0} | Week {int(r['week']) if pd.notna(r['week']) else 0}",
+            axis=1,
         )
 
-        row = req[req["id"] == int(sel.split("|")[0])].iloc[0]
+        selected_label = st.selectbox("Select request", select_df["label"].tolist(), key="request_selectbox")
+        selected_id = int(selected_label.split("|")[0].replace("#", "").strip())
+        row = select_df.loc[pd.to_numeric(select_df["id"], errors="coerce") == selected_id].iloc[0]
 
-        with st.form("convert"):
-            art = st.text_input("Article", row["article"])
+        with st.form("create_or_reject_request_form"):
+            art = st.text_input("Article", value=str(row["article"]))
             sup = st.text_input("Supplier")
-            qty = st.number_input("Quantity", 1, 999, int(row["quantity"]))
-            wk = st.number_input("Week", 1, 53, int(row["week"]))
+            qty = st.number_input("Quantity", min_value=1, max_value=999999, value=int(row["quantity"]), step=1)
+            wk = st.number_input("Week", min_value=1, max_value=53, value=int(row["week"]), step=1)
 
             c1, c2 = st.columns(2)
-
             with c1:
                 create = st.form_submit_button("Create Order", use_container_width=True)
             with c2:
                 reject = st.form_submit_button("Reject", use_container_width=True)
 
         if create:
-            new_order = pd.DataFrame([{
-                "id": next_id(ord),
-                "request_id": row["id"],
-                "article": art,
-                "supplier": sup,
-                "quantity": qty,
-                "week": wk,
-                "year": row["year"],
-                "created_at": datetime.now()
-            }])
+            if not str(art).strip():
+                st.error("Article needed")
+            else:
+                new_order = pd.DataFrame([{
+                    "id": next_id(orders_df),
+                    "request_id": int(row["id"]),
+                    "article": str(art).strip(),
+                    "supplier": str(sup).strip(),
+                    "quantity": int(qty),
+                    "week": int(wk),
+                    "year": int(row["year"]),
+                    "status": "Open",
+                    "created_at": datetime.now().isoformat(timespec="seconds")
+                }])
 
-            ord = pd.concat([ord, new_order])
-            req = req[req["id"] != row["id"]]
+                updated_orders = pd.concat([orders_df, new_order], ignore_index=True)
+                updated_requests = requests_df.loc[pd.to_numeric(requests_df["id"], errors="coerce") != int(row["id"])].copy()
 
-            gh_put_csv(ORD, ord, "update")
-            gh_put_csv(REQ, req, "update")
+                ok1 = gh_put_csv(ORD_PATH, normalize_orders(updated_orders), "update orders")
+                ok2 = gh_put_csv(REQ_PATH, normalize_requests(updated_requests), "update requests")
 
-            st.session_state.ord = ord
-            st.session_state.req = req
-            st.rerun()
+                if ok1 and ok2:
+                    st.session_state["orders_df"] = normalize_orders(updated_orders)
+                    st.session_state["requests_df"] = normalize_requests(updated_requests)
+                    st.success("Order created")
+                    st.rerun()
+                else:
+                    st.error("Order could not be saved to GitHub.")
 
         if reject:
-            new_rej = pd.DataFrame([{
-                "id": next_id(rej),
-                "request_id": row["id"],
-                "article": row["article"],
-                "quantity": row["quantity"],
-                "week": row["week"],
-                "year": row["year"],
-                "note": row["note"],
-                "rejected_at": datetime.now()
+            new_rejected = pd.DataFrame([{
+                "id": next_id(rejected_df),
+                "request_id": int(row["id"]),
+                "article": str(row["article"]),
+                "quantity": int(row["quantity"]),
+                "week": int(row["week"]),
+                "year": int(row["year"]),
+                "note": str(row["note"]) if pd.notna(row["note"]) else "",
+                "rejected_at": datetime.now().isoformat(timespec="seconds")
             }])
 
-            rej = pd.concat([rej, new_rej])
-            req = req[req["id"] != row["id"]]
+            updated_rejected = pd.concat([rejected_df, new_rejected], ignore_index=True)
+            updated_requests = requests_df.loc[pd.to_numeric(requests_df["id"], errors="coerce") != int(row["id"])].copy()
 
-            gh_put_csv(REJ, rej, "update")
-            gh_put_csv(REQ, req, "update")
+            ok1 = gh_put_csv(REJ_PATH, normalize_rejected(updated_rejected), "update rejected")
+            ok2 = gh_put_csv(REQ_PATH, normalize_requests(updated_requests), "update requests")
 
-            st.session_state.rej = rej
-            st.session_state.req = req
-            st.rerun()
+            if ok1 and ok2:
+                st.session_state["rejected_df"] = normalize_rejected(updated_rejected)
+                st.session_state["requests_df"] = normalize_requests(updated_requests)
+                st.success("Request rejected")
+                st.rerun()
+            else:
+                st.error("Rejected request could not be saved to GitHub.")
 
 
 # ============================================================
 # ORDERS
 # ============================================================
-with t2:
+with tab_orders:
     st.subheader("Orders")
 
-    if not ord.empty:
-        df = ord.copy()
-        df.insert(0, "Select", False)
+    if orders_df.empty:
+        st.info("No orders yet.")
+    else:
+        display_orders = orders_df.copy()
+        display_orders.insert(0, "Select", False)
 
-        edited = st.data_editor(df, use_container_width=True)
+        edited_orders = st.data_editor(
+            display_orders,
+            use_container_width=True,
+            hide_index=True,
+            num_rows="fixed",
+            column_config={
+                "Select": st.column_config.CheckboxColumn(required=False),
+            },
+            key="orders_editor",
+        )
 
-        ids = edited.loc[edited["Select"], "id"].tolist()
+        selected_ids = edited_orders.loc[edited_orders["Select"] == True, "id"].tolist()
 
         if st.button("Delete selected", use_container_width=True):
-            ord = ord[~ord["id"].isin(ids)]
-            gh_put_csv(ORD, ord, "update")
-            st.session_state.ord = ord
-            st.rerun()
+            if not selected_ids:
+                st.warning("Select at least one order.")
+            else:
+                updated_orders = orders_df.loc[
+                    ~pd.to_numeric(orders_df["id"], errors="coerce").isin(selected_ids)
+                ].copy()
+
+                if gh_put_csv(ORD_PATH, normalize_orders(updated_orders), "update orders"):
+                    st.session_state["orders_df"] = normalize_orders(updated_orders)
+                    st.success("Selected orders deleted")
+                    st.rerun()
+                else:
+                    st.error("Orders could not be deleted.")
 
         st.download_button(
             "Export Excel",
-            data=excel_bytes(ord),
+            data=excel_bytes(normalize_orders(orders_df)),
             file_name="orders.xlsx",
-            use_container_width=True
+            use_container_width=True,
         )
 
 
 # ============================================================
 # REJECTED
 # ============================================================
-with t3:
+with tab_rejected:
     st.subheader("Rejected")
 
-    if not rej.empty:
-        df = rej.copy()
-        df.insert(0, "Select", False)
+    if rejected_df.empty:
+        st.info("No rejected orders yet.")
+    else:
+        display_rejected = rejected_df.copy()
+        display_rejected.insert(0, "Select", False)
 
-        edited = st.data_editor(df, use_container_width=True)
+        edited_rejected = st.data_editor(
+            display_rejected,
+            use_container_width=True,
+            hide_index=True,
+            num_rows="fixed",
+            column_config={
+                "Select": st.column_config.CheckboxColumn(required=False),
+            },
+            key="rejected_editor",
+        )
 
-        ids = edited.loc[edited["Select"], "id"].tolist()
+        selected_rejected_ids = edited_rejected.loc[edited_rejected["Select"] == True, "id"].tolist()
 
         if st.button("Delete rejected", use_container_width=True):
-            rej = rej[~rej["id"].isin(ids)]
-            gh_put_csv(REJ, rej, "update")
-            st.session_state.rej = rej
-            st.rerun()
+            if not selected_rejected_ids:
+                st.warning("Select at least one rejected item.")
+            else:
+                updated_rejected = rejected_df.loc[
+                    ~pd.to_numeric(rejected_df["id"], errors="coerce").isin(selected_rejected_ids)
+                ].copy()
+
+                if gh_put_csv(REJ_PATH, normalize_rejected(updated_rejected), "update rejected"):
+                    st.session_state["rejected_df"] = normalize_rejected(updated_rejected)
+                    st.success("Selected rejected items deleted")
+                    st.rerun()
+                else:
+                    st.error("Rejected items could not be deleted.")
