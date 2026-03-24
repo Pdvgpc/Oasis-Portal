@@ -273,14 +273,27 @@ def orders_excel_bytes(df: pd.DataFrame) -> BytesIO:
 # Init
 # ============================================================
 user = login_panel()
-requests_df = load_requests()
-orders_df = load_orders()
-rejected_orders_df = load_rejected_orders()
+
+if "requests_df" not in st.session_state:
+    st.session_state["requests_df"] = load_requests()
+
+if "orders_df" not in st.session_state:
+    st.session_state["orders_df"] = load_orders()
+
+if "rejected_orders_df" not in st.session_state:
+    st.session_state["rejected_orders_df"] = load_rejected_orders()
+
+requests_df = st.session_state["requests_df"]
+orders_df = st.session_state["orders_df"]
+rejected_orders_df = st.session_state["rejected_orders_df"]
 
 st.sidebar.success(f"Logged in as {user['name']}")
 
 if st.sidebar.button("Logout"):
     st.session_state["user"] = None
+    st.session_state.pop("requests_df", None)
+    st.session_state.pop("orders_df", None)
+    st.session_state.pop("rejected_orders_df", None)
     st.rerun()
 
 st.title("Oasis Portal")
@@ -320,33 +333,11 @@ with tab_requests:
             new_requests_df = pd.concat([requests_df, pd.DataFrame([new_row])], ignore_index=True)
 
             if save_requests(new_requests_df):
+                st.session_state["requests_df"] = new_requests_df
                 st.success("Request added.")
                 st.rerun()
             else:
                 st.error("Request could not be saved to GitHub.")
-
-    st.markdown("---")
-    st.subheader("Request List")
-
-    if requests_df.empty:
-        st.info("No requests yet.")
-    else:
-        requests_view = requests_df.copy()
-        requests_view = requests_view.rename(columns={
-            "id": "Request ID",
-            "article": "Article",
-            "quantity": "Quantity",
-            "week": "Week",
-            "year": "Year",
-            "note": "Note",
-            "created_at": "Created At",
-        })
-
-        requests_view = requests_view[
-            ["Request ID", "Article", "Quantity", "Week", "Year", "Note", "Created At"]
-        ]
-
-        st.dataframe(requests_view, use_container_width=True, hide_index=True)
 
     st.markdown("---")
     st.subheader("Create or Reject Request")
@@ -417,6 +408,8 @@ with tab_requests:
                 ok_requests = save_requests(new_requests_df)
 
                 if ok_orders and ok_requests:
+                    st.session_state["orders_df"] = new_orders_df
+                    st.session_state["requests_df"] = new_requests_df
                     st.success("Order created. Request removed from open requests.")
                     st.rerun()
                 else:
@@ -443,6 +436,8 @@ with tab_requests:
             ok_requests = save_requests(new_requests_df)
 
             if ok_rejected and ok_requests:
+                st.session_state["rejected_orders_df"] = new_rejected_df
+                st.session_state["requests_df"] = new_requests_df
                 st.success("Request rejected and moved to Rejected Orders.")
                 st.rerun()
             else:
@@ -514,6 +509,7 @@ with tab_orders:
                 ].copy()
 
                 if save_orders(new_orders_df):
+                    st.session_state["orders_df"] = new_orders_df
                     st.success(f"Deleted orders: {', '.join(map(str, selected_order_ids))}")
                     st.rerun()
                 else:
