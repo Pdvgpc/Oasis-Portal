@@ -541,4 +541,33 @@ with tab_rejected:
             ["Rejected ID", "Request ID", "Article", "Quantity", "Week", "Year", "Note", "Rejected At"]
         ]
 
-        st.dataframe(rejected_view, use_container_width=True, hide_index=True)
+        delete_rejected_df = rejected_view.copy()
+        delete_rejected_df.insert(0, "Select", False)
+
+        edited_rejected = st.data_editor(
+            delete_rejected_df,
+            use_container_width=True,
+            hide_index=True,
+            num_rows="fixed",
+            column_config={
+                "Select": st.column_config.CheckboxColumn(required=False),
+            },
+            key="rejected_delete_editor",
+        )
+
+        selected_rejected_ids = edited_rejected.loc[edited_rejected["Select"] == True, "Rejected ID"].tolist()
+
+        if st.button("Delete Selected Rejected Orders", type="primary"):
+            if not selected_rejected_ids:
+                st.warning("Select at least one rejected order.")
+            else:
+                new_rejected_df = rejected_orders_df.loc[
+                    ~pd.to_numeric(rejected_orders_df["id"], errors="coerce").isin(selected_rejected_ids)
+                ].copy()
+
+                if save_rejected_orders(new_rejected_df):
+                    st.session_state["rejected_orders_df"] = new_rejected_df
+                    st.success(f"Deleted rejected orders: {', '.join(map(str, selected_rejected_ids))}")
+                    st.rerun()
+                else:
+                    st.error("Rejected orders could not be deleted.")
