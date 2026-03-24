@@ -1,7 +1,7 @@
 import base64
 import json
 from datetime import datetime
-from io import StringIO
+from io import BytesIO, StringIO
 from typing import Optional
 
 import pandas as pd
@@ -113,6 +113,11 @@ def orders_path() -> str:
     return f"{repo_dir}/orders.csv"
 
 
+def rejected_orders_path() -> str:
+    repo_dir = SEC.get("DATA_DIR", "data")
+    return f"{repo_dir}/rejected_orders.csv"
+
+
 # ============================================================
 # Auth
 # ============================================================
@@ -167,7 +172,7 @@ def ensure_columns(df: pd.DataFrame, columns: list[str]) -> pd.DataFrame:
 
 
 def normalize_requests(df: pd.DataFrame) -> pd.DataFrame:
-    cols = ["id", "article", "quantity", "week", "year", "note", "status", "created_at"]
+    cols = ["id", "article", "quantity", "week", "year", "note", "created_at"]
     if df is None:
         df = pd.DataFrame(columns=cols)
     df = ensure_columns(df, cols)
@@ -190,10 +195,22 @@ def normalize_orders(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def normalize_rejected_orders(df: pd.DataFrame) -> pd.DataFrame:
+    cols = ["id", "request_id", "article", "quantity", "week", "year", "note", "rejected_at"]
+    if df is None:
+        df = pd.DataFrame(columns=cols)
+    df = ensure_columns(df, cols)
+
+    for col in ["id", "request_id", "quantity", "week", "year"]:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    return df
+
+
 def load_requests() -> pd.DataFrame:
     df = gh_get_csv(requests_path())
     if df is None:
-        df = pd.DataFrame(columns=["id", "article", "quantity", "week", "year", "note", "status", "created_at"])
+        df = pd.DataFrame(columns=["id", "article", "quantity", "week", "year", "note", "created_at"])
     return normalize_requests(df)
 
 
@@ -204,12 +221,23 @@ def load_orders() -> pd.DataFrame:
     return normalize_orders(df)
 
 
+def load_rejected_orders() -> pd.DataFrame:
+    df = gh_get_csv(rejected_orders_path())
+    if df is None:
+        df = pd.DataFrame(columns=["id", "request_id", "article", "quantity", "week", "year", "note", "rejected_at"])
+    return normalize_rejected_orders(df)
+
+
 def save_requests(df: pd.DataFrame) -> bool:
     return gh_put_csv(requests_path(), normalize_requests(df), "update requests.csv")
 
 
 def save_orders(df: pd.DataFrame) -> bool:
     return gh_put_csv(orders_path(), normalize_orders(df), "update orders.csv")
+
+
+def save_rejected_orders(df: pd.DataFrame) -> bool:
+    return gh_put_csv(rejected_orders_path(), normalize_rejected_orders(df), "update rejected_orders.csv")
 
 
 def next_id(df: pd.DataFrame) -> int:
@@ -221,12 +249,33 @@ def next_id(df: pd.DataFrame) -> int:
         return 1
 
 
+def orders_excel_bytes(df: pd.DataFrame) -> BytesIO:
+    output = BytesIO()
+    export_df = df.copy()
+
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        export_df.to_excel(writer, index=False, sheet_name="Orders")
+        ws = writer.sheets["Orders"]
+
+        for column_cells in ws.columns:
+            max_length = 0
+            col_letter = column_cells[0].column_letter
+            for cell in column_cells:
+                cell_value = "" if cell.value is None else str(cell.value)
+                max_length = max(max_length, len(cell_value))
+            ws.column_dimensions[col_letter].width = min(max_length + 2, 30)
+
+    output.seek(0)
+    return output
+
+
 # ============================================================
 # Init
 # ============================================================
 user = login_panel()
 requests_df = load_requests()
 orders_df = load_orders()
+rejected_orders_df = load_rejected_orders()
 
 st.sidebar.success(f"Logged in as {user['name']}")
 
@@ -236,7 +285,7 @@ if st.sidebar.button("Logout"):
 
 st.title("Oasis Portal")
 
-tab_requests, tab_orders = st.tabs(["Requests", "Orders"])
+tab_requests, tab_orders, tab_rejected = st.tabs(["Requests", "Orders", "Rejected Orders"])
 
 
 # ============================================================
@@ -265,7 +314,6 @@ with tab_requests:
                 "week": int(week),
                 "year": int(year),
                 "note": note.strip(),
-                "status": "New",
                 "created_at": datetime.now().isoformat(timespec="seconds"),
             }
 
@@ -291,37 +339,37 @@ with tab_requests:
             "week": "Week",
             "year": "Year",
             "note": "Note",
-            "status": "Status",
             "created_at": "Created At",
         })
 
         requests_view = requests_view[
-            ["Request ID", "Article", "Quantity", "Week", "Year", "Note", "Status", "Created At"]
+            ["Request ID", "Article", "Quantity", "Week", "Year", "Note", "Created At"]
         ]
 
         st.dataframe(requests_view, use_container_width=True, hide_index=True)
 
     st.markdown("---")
-    st.subheader("Create Order from Request")
+    st.subheader("Create or Reject Request")
 
-    open_requests = requests_df[requests_df["status"].astype(str) != "Converted"].copy()
-
-    if open_requests.empty:
+    if requests_df.empty:
         st.info("No open requests available.")
     else:
-        open_requests["label"] = open_requests.apply(
+        requests_select_df = requests_df.copy()
+        requests_select_df["label"] = requests_select_df.apply(
             lambda r: f"#{int(r['id'])} | {str(r['article'])} | Qty {int(r['quantity']) if pd.notna(r['quantity']) else 0} | Week {int(r['week']) if pd.notna(r['week']) else 0}",
             axis=1,
         )
 
-        labels = open_requests["label"].tolist()
-        id_by_label = dict(zip(open_requests["label"], open_requests["id"]))
+        labels = requests_select_df["label"].tolist()
+        id_by_label = dict(zip(requests_select_df["label"], requests_select_df["id"]))
 
         selected_label = st.selectbox("Select request", options=labels)
         selected_id = int(id_by_label[selected_label])
-        selected_row = open_requests.loc[pd.to_numeric(open_requests["id"], errors="coerce") == selected_id].iloc[0]
+        selected_row = requests_select_df.loc[
+            pd.to_numeric(requests_select_df["id"], errors="coerce") == selected_id
+        ].iloc[0]
 
-        with st.form("create_order_form"):
+        with st.form("create_or_reject_form"):
             new_article = st.text_input("Article", value=str(selected_row["article"]))
             new_supplier = st.text_input("Supplier", value="")
             new_qty = st.number_input(
@@ -338,9 +386,13 @@ with tab_requests:
                 value=int(selected_row["week"]) if pd.notna(selected_row["week"]) else 1,
             )
 
-            confirm_order = st.form_submit_button("Create Order")
+            c1, c2 = st.columns(2)
+            with c1:
+                create_order = st.form_submit_button("Create Order", use_container_width=True)
+            with c2:
+                reject_request = st.form_submit_button("Reject Request", use_container_width=True)
 
-        if confirm_order:
+        if create_order:
             if not new_article.strip():
                 st.error("Article is required.")
             else:
@@ -357,20 +409,44 @@ with tab_requests:
                 }
 
                 new_orders_df = pd.concat([orders_df, pd.DataFrame([new_order])], ignore_index=True)
-                new_requests_df = requests_df.copy()
-                new_requests_df.loc[
-                    pd.to_numeric(new_requests_df["id"], errors="coerce") == int(selected_row["id"]),
-                    "status"
-                ] = "Converted"
+                new_requests_df = requests_df.loc[
+                    pd.to_numeric(requests_df["id"], errors="coerce") != int(selected_row["id"])
+                ].copy()
 
                 ok_orders = save_orders(new_orders_df)
                 ok_requests = save_requests(new_requests_df)
 
                 if ok_orders and ok_requests:
-                    st.success("Order created.")
+                    st.success("Order created. Request removed from open requests.")
                     st.rerun()
                 else:
                     st.error("Order could not be saved to GitHub.")
+
+        if reject_request:
+            new_rejected_row = {
+                "id": next_id(rejected_orders_df),
+                "request_id": int(selected_row["id"]),
+                "article": str(selected_row["article"]),
+                "quantity": int(selected_row["quantity"]) if pd.notna(selected_row["quantity"]) else 0,
+                "week": int(selected_row["week"]) if pd.notna(selected_row["week"]) else 0,
+                "year": int(selected_row["year"]) if pd.notna(selected_row["year"]) else datetime.now().year,
+                "note": str(selected_row["note"]) if pd.notna(selected_row["note"]) else "",
+                "rejected_at": datetime.now().isoformat(timespec="seconds"),
+            }
+
+            new_rejected_df = pd.concat([rejected_orders_df, pd.DataFrame([new_rejected_row])], ignore_index=True)
+            new_requests_df = requests_df.loc[
+                pd.to_numeric(requests_df["id"], errors="coerce") != int(selected_row["id"])
+            ].copy()
+
+            ok_rejected = save_rejected_orders(new_rejected_df)
+            ok_requests = save_requests(new_requests_df)
+
+            if ok_rejected and ok_requests:
+                st.success("Request rejected and moved to Rejected Orders.")
+                st.rerun()
+            else:
+                st.error("Request could not be rejected.")
 
 
 # ============================================================
@@ -399,4 +475,74 @@ with tab_orders:
             ["Order ID", "Request ID", "Article", "Supplier", "Quantity", "Week", "Year", "Status", "Created At"]
         ]
 
-        st.dataframe(orders_view, use_container_width=True, hide_index=True)
+        excel_file = orders_excel_bytes(orders_view)
+
+        c1, c2 = st.columns([1, 3])
+        with c1:
+            st.download_button(
+                label="Export Orders to Excel",
+                data=excel_file.getvalue(),
+                file_name=f"oasis_orders_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True,
+            )
+
+        st.markdown("---")
+
+        delete_df = orders_view.copy()
+        delete_df.insert(0, "Select", False)
+
+        edited_orders = st.data_editor(
+            delete_df,
+            use_container_width=True,
+            hide_index=True,
+            num_rows="fixed",
+            column_config={
+                "Select": st.column_config.CheckboxColumn(required=False),
+            },
+            key="orders_delete_editor",
+        )
+
+        selected_order_ids = edited_orders.loc[edited_orders["Select"] == True, "Order ID"].tolist()
+
+        if st.button("Delete Selected Orders", type="primary"):
+            if not selected_order_ids:
+                st.warning("Select at least one order.")
+            else:
+                new_orders_df = orders_df.loc[
+                    ~pd.to_numeric(orders_df["id"], errors="coerce").isin(selected_order_ids)
+                ].copy()
+
+                if save_orders(new_orders_df):
+                    st.success(f"Deleted orders: {', '.join(map(str, selected_order_ids))}")
+                    st.rerun()
+                else:
+                    st.error("Orders could not be deleted.")
+
+
+# ============================================================
+# Rejected Orders tab
+# ============================================================
+with tab_rejected:
+    st.subheader("Rejected Orders")
+
+    if rejected_orders_df.empty:
+        st.info("No rejected orders yet.")
+    else:
+        rejected_view = rejected_orders_df.copy()
+        rejected_view = rejected_view.rename(columns={
+            "id": "Rejected ID",
+            "request_id": "Request ID",
+            "article": "Article",
+            "quantity": "Quantity",
+            "week": "Week",
+            "year": "Year",
+            "note": "Note",
+            "rejected_at": "Rejected At",
+        })
+
+        rejected_view = rejected_view[
+            ["Rejected ID", "Request ID", "Article", "Quantity", "Week", "Year", "Note", "Rejected At"]
+        ]
+
+        st.dataframe(rejected_view, use_container_width=True, hide_index=True)
