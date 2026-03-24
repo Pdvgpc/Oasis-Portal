@@ -113,11 +113,6 @@ def orders_path() -> str:
     return f"{repo_dir}/orders.csv"
 
 
-def layout_path() -> str:
-    repo_dir = SEC.get("DATA_DIR", "data")
-    return f"{repo_dir}/layout_settings.json"
-
-
 # ============================================================
 # Auth
 # ============================================================
@@ -227,63 +222,6 @@ def next_id(df: pd.DataFrame) -> int:
 
 
 # ============================================================
-# Layout settings
-# ============================================================
-def load_layout_settings() -> dict:
-    txt = gh_get_text(layout_path())
-    if not txt:
-        return {}
-    try:
-        data = json.loads(txt)
-        return data if isinstance(data, dict) else {}
-    except Exception:
-        return {}
-
-
-def save_layout_settings(data: dict) -> bool:
-    content = json.dumps(data, indent=2, sort_keys=True)
-    return gh_put_text(layout_path(), content, "update layout_settings.json")
-
-
-def get_user_layout(username: str, section: str, default_columns: list[str]) -> dict:
-    data = load_layout_settings()
-    section_data = data.get(username, {}).get(section, {})
-
-    visible_columns = section_data.get("visible_columns", default_columns)
-    visible_columns = [c for c in visible_columns if c in default_columns]
-
-    if not visible_columns:
-        visible_columns = default_columns
-
-    return {
-        "visible_columns": visible_columns
-    }
-
-
-def save_user_layout(username: str, section: str, visible_columns: list[str], default_columns: list[str]) -> bool:
-    visible_columns = [c for c in visible_columns if c in default_columns]
-    if not visible_columns:
-        visible_columns = default_columns
-
-    data = load_layout_settings()
-    data.setdefault(username, {})
-    data[username][section] = {
-        "visible_columns": visible_columns
-    }
-    return save_layout_settings(data)
-
-
-def apply_layout(df: pd.DataFrame, username: str, section: str, default_columns: list[str]) -> pd.DataFrame:
-    layout = get_user_layout(username, section, default_columns)
-    visible_cols = [c for c in default_columns if c in layout["visible_columns"] and c in df.columns]
-
-    if not visible_cols:
-        visible_cols = [c for c in default_columns if c in df.columns]
-
-    return df[visible_cols].copy()
-
-
-# ============================================================
 # Init
 # ============================================================
 user = login_panel()
@@ -340,32 +278,6 @@ with tab_requests:
                 st.error("Request could not be saved to GitHub.")
 
     st.markdown("---")
-
-    request_display_cols = ["Request ID", "Article", "Quantity", "Week", "Year", "Note", "Status", "Created At"]
-    current_req_layout = get_user_layout(user["username"], "requests", request_display_cols)
-
-    st.subheader("Columns")
-    req_visible_cols = st.multiselect(
-        "Select visible columns",
-        options=request_display_cols,
-        default=current_req_layout["visible_columns"],
-        key="req_visible_cols",
-    )
-
-    if st.button("Save Columns", key="save_request_columns"):
-        ok = save_user_layout(
-            user["username"],
-            "requests",
-            req_visible_cols,
-            request_display_cols
-        )
-        if ok:
-            st.success("Request columns saved.")
-            st.rerun()
-        else:
-            st.error("Failed to save request columns.")
-
-    st.markdown("---")
     st.subheader("Request List")
 
     if requests_df.empty:
@@ -383,7 +295,10 @@ with tab_requests:
             "created_at": "Created At",
         })
 
-        requests_view = apply_layout(requests_view, user["username"], "requests", request_display_cols)
+        requests_view = requests_view[
+            ["Request ID", "Article", "Quantity", "Week", "Year", "Note", "Status", "Created At"]
+        ]
+
         st.dataframe(requests_view, use_container_width=True, hide_index=True)
 
     st.markdown("---")
@@ -462,31 +377,6 @@ with tab_requests:
 # Orders tab
 # ============================================================
 with tab_orders:
-    order_display_cols = ["Order ID", "Request ID", "Article", "Supplier", "Quantity", "Week", "Year", "Status", "Created At"]
-    current_ord_layout = get_user_layout(user["username"], "orders", order_display_cols)
-
-    st.subheader("Columns")
-    ord_visible_cols = st.multiselect(
-        "Select visible columns",
-        options=order_display_cols,
-        default=current_ord_layout["visible_columns"],
-        key="ord_visible_cols",
-    )
-
-    if st.button("Save Columns", key="save_order_columns"):
-        ok = save_user_layout(
-            user["username"],
-            "orders",
-            ord_visible_cols,
-            order_display_cols
-        )
-        if ok:
-            st.success("Order columns saved.")
-            st.rerun()
-        else:
-            st.error("Failed to save order columns.")
-
-    st.markdown("---")
     st.subheader("Orders")
 
     if orders_df.empty:
@@ -505,5 +395,8 @@ with tab_orders:
             "created_at": "Created At",
         })
 
-        orders_view = apply_layout(orders_view, user["username"], "orders", order_display_cols)
+        orders_view = orders_view[
+            ["Order ID", "Request ID", "Article", "Supplier", "Quantity", "Week", "Year", "Status", "Created At"]
+        ]
+
         st.dataframe(orders_view, use_container_width=True, hide_index=True)
