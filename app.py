@@ -9,6 +9,9 @@ import requests
 import streamlit as st
 import yaml
 
+# ============================================================
+# Page config
+# ============================================================
 st.set_page_config(page_title="Oasis Portal", layout="wide")
 
 SEC = dict(st.secrets)
@@ -145,7 +148,7 @@ def login_panel():
     username = st.text_input("Username")
     password = st.text_input("Password", type="password")
 
-    if st.button("Login", type="primary"):
+    if st.button("Login", type="primary", use_container_width=True):
         rec = users.get(username)
         if rec and str(password) == str(rec.get("password_plain", "")):
             st.session_state["user"] = {
@@ -270,6 +273,32 @@ def orders_excel_bytes(df: pd.DataFrame) -> BytesIO:
 
 
 # ============================================================
+# Mobile mode
+# ============================================================
+st.session_state.setdefault("mobile_mode", False)
+
+top_left, top_right = st.columns([5, 1])
+with top_right:
+    mobile_mode = st.checkbox("📱 Mobile", value=st.session_state["mobile_mode"])
+    st.session_state["mobile_mode"] = mobile_mode
+
+if st.session_state["mobile_mode"]:
+    st.markdown(
+        """
+        <style>
+        .block-container {
+            max-width: 700px;
+            padding-top: 1.2rem;
+            padding-left: 1rem;
+            padding-right: 1rem;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+# ============================================================
 # Init
 # ============================================================
 user = login_panel()
@@ -314,7 +343,7 @@ with tab_requests:
         year = st.number_input("Year", min_value=2025, max_value=2100, step=1, value=datetime.now().year)
         note = st.text_input("Note")
 
-        submit_request = st.form_submit_button("Add Request")
+        submit_request = st.form_submit_button("Add Request", use_container_width=True)
 
     if submit_request:
         if not article.strip():
@@ -472,8 +501,7 @@ with tab_orders:
 
         excel_file = orders_excel_bytes(orders_view)
 
-        c1, c2 = st.columns([1, 3])
-        with c1:
+        if st.session_state["mobile_mode"]:
             st.download_button(
                 label="Export Orders to Excel",
                 data=excel_file.getvalue(),
@@ -481,6 +509,16 @@ with tab_orders:
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 use_container_width=True,
             )
+        else:
+            c1, c2 = st.columns([1, 3])
+            with c1:
+                st.download_button(
+                    label="Export Orders to Excel",
+                    data=excel_file.getvalue(),
+                    file_name=f"oasis_orders_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True,
+                )
 
         st.markdown("---")
 
@@ -500,7 +538,7 @@ with tab_orders:
 
         selected_order_ids = edited_orders.loc[edited_orders["Select"] == True, "Order ID"].tolist()
 
-        if st.button("Delete Selected Orders", type="primary"):
+        if st.button("Delete Selected Orders", type="primary", use_container_width=st.session_state["mobile_mode"]):
             if not selected_order_ids:
                 st.warning("Select at least one order.")
             else:
@@ -557,7 +595,7 @@ with tab_rejected:
 
         selected_rejected_ids = edited_rejected.loc[edited_rejected["Select"] == True, "Rejected ID"].tolist()
 
-        if st.button("Delete Selected Rejected Orders", type="primary"):
+        if st.button("Delete Selected Rejected Orders", type="primary", use_container_width=st.session_state["mobile_mode"]):
             if not selected_rejected_ids:
                 st.warning("Select at least one rejected order.")
             else:
