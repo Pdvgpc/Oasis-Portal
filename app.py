@@ -250,39 +250,32 @@ def get_user_layout(username: str, section: str, default_columns: list[str]) -> 
     section_data = data.get(username, {}).get(section, {})
 
     visible_columns = section_data.get("visible_columns", default_columns)
-    column_order = section_data.get("column_order", default_columns)
-
     visible_columns = [c for c in visible_columns if c in default_columns]
-    column_order = [c for c in column_order if c in default_columns]
-
-    for col in default_columns:
-        if col not in column_order:
-            column_order.append(col)
 
     if not visible_columns:
         visible_columns = default_columns
 
     return {
-        "visible_columns": visible_columns,
-        "column_order": column_order,
+        "visible_columns": visible_columns
     }
 
 
-def save_user_layout(username: str, section: str, visible_columns: list[str], column_order: list[str]) -> bool:
+def save_user_layout(username: str, section: str, visible_columns: list[str], default_columns: list[str]) -> bool:
+    visible_columns = [c for c in visible_columns if c in default_columns]
+    if not visible_columns:
+        visible_columns = default_columns
+
     data = load_layout_settings()
     data.setdefault(username, {})
     data[username][section] = {
-        "visible_columns": visible_columns,
-        "column_order": column_order,
+        "visible_columns": visible_columns
     }
     return save_layout_settings(data)
 
 
 def apply_layout(df: pd.DataFrame, username: str, section: str, default_columns: list[str]) -> pd.DataFrame:
     layout = get_user_layout(username, section, default_columns)
-
-    ordered_cols = [c for c in layout["column_order"] if c in df.columns]
-    visible_cols = [c for c in ordered_cols if c in layout["visible_columns"]]
+    visible_cols = [c for c in default_columns if c in layout["visible_columns"] and c in df.columns]
 
     if not visible_cols:
         visible_cols = [c for c in default_columns if c in df.columns]
@@ -301,7 +294,6 @@ st.sidebar.success(f"Logged in as {user['name']}")
 
 if st.sidebar.button("Logout"):
     st.session_state["user"] = None
-    st.session_state.pop("selected_request_id", None)
     st.rerun()
 
 st.title("Oasis Portal")
@@ -348,43 +340,30 @@ with tab_requests:
                 st.error("Request could not be saved to GitHub.")
 
     st.markdown("---")
-    st.subheader("Request Layout Settings")
 
     request_display_cols = ["Request ID", "Article", "Quantity", "Week", "Year", "Note", "Status", "Created At"]
     current_req_layout = get_user_layout(user["username"], "requests", request_display_cols)
 
+    st.subheader("Columns")
     req_visible_cols = st.multiselect(
-        "Visible request columns",
+        "Select visible columns",
         options=request_display_cols,
         default=current_req_layout["visible_columns"],
         key="req_visible_cols",
     )
 
-    req_layout_editor = pd.DataFrame({
-        "Column": request_display_cols,
-        "Position": [current_req_layout["column_order"].index(c) + 1 for c in request_display_cols],
-    })
-
-    req_layout_edited = st.data_editor(
-        req_layout_editor,
-        use_container_width=True,
-        hide_index=True,
-        num_rows="fixed",
-        column_config={
-            "Column": st.column_config.TextColumn(disabled=True),
-            "Position": st.column_config.NumberColumn(min_value=1, max_value=len(request_display_cols), step=1),
-        },
-        key="req_layout_editor_table",
-    )
-
-    if st.button("Save Request Layout"):
-        req_ordered_cols = req_layout_edited.sort_values("Position")["Column"].tolist()
-        ok = save_user_layout(user["username"], "requests", req_visible_cols, req_ordered_cols)
+    if st.button("Save Columns", key="save_request_columns"):
+        ok = save_user_layout(
+            user["username"],
+            "requests",
+            req_visible_cols,
+            request_display_cols
+        )
         if ok:
-            st.success("Request layout saved.")
+            st.success("Request columns saved.")
             st.rerun()
         else:
-            st.error("Request layout could not be saved.")
+            st.error("Failed to save request columns.")
 
     st.markdown("---")
     st.subheader("Request List")
@@ -464,7 +443,10 @@ with tab_requests:
 
                 new_orders_df = pd.concat([orders_df, pd.DataFrame([new_order])], ignore_index=True)
                 new_requests_df = requests_df.copy()
-                new_requests_df.loc[pd.to_numeric(new_requests_df["id"], errors="coerce") == int(selected_row["id"]), "status"] = "Converted"
+                new_requests_df.loc[
+                    pd.to_numeric(new_requests_df["id"], errors="coerce") == int(selected_row["id"]),
+                    "status"
+                ] = "Converted"
 
                 ok_orders = save_orders(new_orders_df)
                 ok_requests = save_requests(new_requests_df)
@@ -480,43 +462,29 @@ with tab_requests:
 # Orders tab
 # ============================================================
 with tab_orders:
-    st.subheader("Order Layout Settings")
-
     order_display_cols = ["Order ID", "Request ID", "Article", "Supplier", "Quantity", "Week", "Year", "Status", "Created At"]
     current_ord_layout = get_user_layout(user["username"], "orders", order_display_cols)
 
+    st.subheader("Columns")
     ord_visible_cols = st.multiselect(
-        "Visible order columns",
+        "Select visible columns",
         options=order_display_cols,
         default=current_ord_layout["visible_columns"],
         key="ord_visible_cols",
     )
 
-    ord_layout_editor = pd.DataFrame({
-        "Column": order_display_cols,
-        "Position": [current_ord_layout["column_order"].index(c) + 1 for c in order_display_cols],
-    })
-
-    ord_layout_edited = st.data_editor(
-        ord_layout_editor,
-        use_container_width=True,
-        hide_index=True,
-        num_rows="fixed",
-        column_config={
-            "Column": st.column_config.TextColumn(disabled=True),
-            "Position": st.column_config.NumberColumn(min_value=1, max_value=len(order_display_cols), step=1),
-        },
-        key="ord_layout_editor_table",
-    )
-
-    if st.button("Save Order Layout"):
-        ord_ordered_cols = ord_layout_edited.sort_values("Position")["Column"].tolist()
-        ok = save_user_layout(user["username"], "orders", ord_visible_cols, ord_ordered_cols)
+    if st.button("Save Columns", key="save_order_columns"):
+        ok = save_user_layout(
+            user["username"],
+            "orders",
+            ord_visible_cols,
+            order_display_cols
+        )
         if ok:
-            st.success("Order layout saved.")
+            st.success("Order columns saved.")
             st.rerun()
         else:
-            st.error("Order layout could not be saved.")
+            st.error("Failed to save order columns.")
 
     st.markdown("---")
     st.subheader("Orders")
