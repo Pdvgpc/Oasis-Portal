@@ -176,10 +176,83 @@ def next_id(df: pd.DataFrame) -> int:
         return 1
 
 
-def excel_bytes(df: pd.DataFrame) -> BytesIO:
+def auto_width_worksheet(ws, max_width: int = 35):
+    for column_cells in ws.columns:
+        max_length = 0
+        col_letter = column_cells[0].column_letter
+        for cell in column_cells:
+            value = "" if cell.value is None else str(cell.value)
+            max_length = max(max_length, len(value))
+        ws.column_dimensions[col_letter].width = min(max_length + 2, max_width)
+
+
+def orders_excel_bytes(df: pd.DataFrame) -> BytesIO:
     buf = BytesIO()
+    export_df = df.copy()
+
     with pd.ExcelWriter(buf, engine="openpyxl") as writer:
-        df.to_excel(writer, index=False, sheet_name="Orders")
+        export_df.to_excel(writer, index=False, sheet_name="Orders")
+        ws = writer.sheets["Orders"]
+        auto_width_worksheet(ws)
+
+    buf.seek(0)
+    return buf
+
+
+def build_requests_pivot_export_df(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty:
+        return pd.DataFrame(columns=["Article", "Note"])
+
+    work = df.copy()
+    work["article"] = work["article"].astype(str).fillna("")
+    work["note"] = work["note"].astype(str).fillna("")
+    work["quantity"] = pd.to_numeric(work["quantity"], errors="coerce").fillna(0).astype(int)
+    work["week"] = pd.to_numeric(work["week"], errors="coerce").astype("Int64")
+    work["year"] = pd.to_numeric(work["year"], errors="coerce").astype("Int64")
+
+    def make_yearweek(row):
+        if pd.isna(row["year"]) or pd.isna(row["week"]):
+            return None
+        return f"{int(row['year'])}{int(row['week']):02d}"
+
+    work["YearWeek"] = work.apply(make_yearweek, axis=1)
+    work = work[work["YearWeek"].notna()].copy()
+
+    if work.empty:
+        return pd.DataFrame(columns=["Article", "Note"])
+
+    pivot = work.pivot_table(
+        index=["article", "note"],
+        columns="YearWeek",
+        values="quantity",
+        aggfunc="sum",
+        fill_value=0,
+    )
+
+    if isinstance(pivot.columns, pd.MultiIndex):
+        pivot.columns = [c[-1] for c in pivot.columns]
+
+    cols_sorted = sorted([c for c in pivot.columns if c is not None], key=lambda x: int(x))
+    pivot = pivot.reindex(columns=cols_sorted)
+
+    pivot = pivot.reset_index()
+    pivot = pivot.rename(columns={
+        "article": "Article",
+        "note": "Note",
+    })
+
+    return pivot
+
+
+def requests_excel_bytes(df: pd.DataFrame) -> BytesIO:
+    buf = BytesIO()
+    export_df = build_requests_pivot_export_df(df)
+
+    with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+        export_df.to_excel(writer, index=False, sheet_name="Requests")
+        ws = writer.sheets["Requests"]
+        auto_width_worksheet(ws)
+
     buf.seek(0)
     return buf
 
@@ -280,6 +353,61 @@ with tab_requests:
                 st.error("Request could not be saved to GitHub.")
 
     st.markdown("---")
+    st.subheader("Export Requests to Excel")
+
+    if requests_df.empty:
+        st.info("No requests available for export.")
+    else:
+        export_requests_df = requests_df.copy()
+        export_requests_df.insert(0, "Select", False)
+
+        export_requests_df = export_requests_df.rename(columns={
+            "id": "Request ID",
+            "article": "Article",
+            "quantity": "Quantity",
+            "week": "Week",
+            "year": "Year",
+            "note": "Note",
+            "created_at": "Created At",
+        })
+
+        export_requests_df = export_requests_df[
+            ["Select", "Request ID", "Article", "Quantity", "Week", "Year", "Note", "Created At"]
+        ]
+
+        edited_requests_export = st.data_editor(
+            export_requests_df,
+            use_container_width=True,
+            hide_index=True,
+            num_rows="fixed",
+            column_config={
+                "Select": st.column_config.CheckboxColumn(required=False),
+            },
+            key="requests_export_editor",
+        )
+
+        selected_request_ids = edited_requests_export.loc[
+            edited_requests_export["Select"] == True, "Request ID"
+        ].tolist()
+
+        if selected_request_ids:
+            selected_requests_df = requests_df.loc[
+                pd.to_numeric(requests_df["id"], errors="coerce").isin(selected_request_ids)
+            ].copy()
+
+            req_excel = requests_excel_bytes(selected_requests_df)
+
+            st.download_button(
+                "Export Selected Requests to Excel",
+                data=req_excel.getvalue(),
+                file_name=f"requests_export_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True,
+            )
+        else:
+            st.caption("Select one or more requests to enable export.")
+
+    st.markdown("---")
     st.subheader("Create or Reject Request")
 
     if requests_df.empty:
@@ -324,7 +452,9 @@ with tab_requests:
                 }])
 
                 updated_orders = pd.concat([orders_df, new_order], ignore_index=True)
-                updated_requests = requests_df.loc[pd.to_numeric(requests_df["id"], errors="coerce") != int(row["id"])].copy()
+                updated_requests = requests_df.loc[
+                    pd.to_numeric(requests_df["id"], errors="coerce") != int(row["id"])
+                ].copy()
 
                 ok1 = gh_put_csv(ORD_PATH, normalize_orders(updated_orders), "update orders")
                 ok2 = gh_put_csv(REQ_PATH, normalize_requests(updated_requests), "update requests")
@@ -350,7 +480,9 @@ with tab_requests:
             }])
 
             updated_rejected = pd.concat([rejected_df, new_rejected], ignore_index=True)
-            updated_requests = requests_df.loc[pd.to_numeric(requests_df["id"], errors="coerce") != int(row["id"])].copy()
+            updated_requests = requests_df.loc[
+                pd.to_numeric(requests_df["id"], errors="coerce") != int(row["id"])
+            ].copy()
 
             ok1 = gh_put_csv(REJ_PATH, normalize_rejected(updated_rejected), "update rejected")
             ok2 = gh_put_csv(REQ_PATH, normalize_requests(updated_requests), "update requests")
@@ -406,7 +538,7 @@ with tab_orders:
 
         st.download_button(
             "Export Excel",
-            data=excel_bytes(normalize_orders(orders_df)),
+            data=orders_excel_bytes(normalize_orders(orders_df)),
             file_name="orders.xlsx",
             use_container_width=True,
         )
