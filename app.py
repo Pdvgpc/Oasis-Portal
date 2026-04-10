@@ -91,10 +91,7 @@ def gh_get_csv(path: str) -> pd.DataFrame:
 # Paths
 # ============================================================
 DATA_DIR = SEC.get("DATA_DIR", "data")
-
-REQ_PATH = f"{DATA_DIR}/requests.csv"
-ORD_PATH = f"{DATA_DIR}/orders.csv"
-REJ_PATH = f"{DATA_DIR}/rejected_orders.csv"
+LIST_PATH = f"{DATA_DIR}/request_list.csv"
 
 
 # ============================================================
@@ -143,27 +140,26 @@ def ensure_columns(df: pd.DataFrame, cols: list[str]) -> pd.DataFrame:
     return df[cols]
 
 
-def normalize_requests(df: pd.DataFrame) -> pd.DataFrame:
-    cols = ["id", "article", "quantity", "week", "year", "note", "created_at"]
+def normalize_list(df: pd.DataFrame) -> pd.DataFrame:
+    cols = [
+        "id",
+        "article",
+        "quantity",
+        "week",
+        "year",
+        "note",
+        "supplier",
+        "status",
+        "created_at",
+    ]
     df = ensure_columns(df if df is not None else pd.DataFrame(), cols)
+
     for c in ["id", "quantity", "week", "year"]:
         df[c] = pd.to_numeric(df[c], errors="coerce")
-    return df
 
+    for c in ["article", "note", "supplier", "status", "created_at"]:
+        df[c] = df[c].astype("string")
 
-def normalize_orders(df: pd.DataFrame) -> pd.DataFrame:
-    cols = ["id", "request_id", "article", "supplier", "quantity", "week", "year", "status", "created_at"]
-    df = ensure_columns(df if df is not None else pd.DataFrame(), cols)
-    for c in ["id", "request_id", "quantity", "week", "year"]:
-        df[c] = pd.to_numeric(df[c], errors="coerce")
-    return df
-
-
-def normalize_rejected(df: pd.DataFrame) -> pd.DataFrame:
-    cols = ["id", "request_id", "article", "quantity", "week", "year", "note", "rejected_at"]
-    df = ensure_columns(df if df is not None else pd.DataFrame(), cols)
-    for c in ["id", "request_id", "quantity", "week", "year"]:
-        df[c] = pd.to_numeric(df[c], errors="coerce")
     return df
 
 
@@ -176,82 +172,36 @@ def next_id(df: pd.DataFrame) -> int:
         return 1
 
 
-def auto_width_worksheet(ws, max_width: int = 35):
-    for column_cells in ws.columns:
-        max_length = 0
-        col_letter = column_cells[0].column_letter
-        for cell in column_cells:
-            value = "" if cell.value is None else str(cell.value)
-            max_length = max(max_length, len(value))
-        ws.column_dimensions[col_letter].width = min(max_length + 2, max_width)
-
-
-def orders_excel_bytes(df: pd.DataFrame) -> BytesIO:
+def excel_bytes(df: pd.DataFrame) -> BytesIO:
     buf = BytesIO()
-    export_df = df.copy()
 
-    with pd.ExcelWriter(buf, engine="openpyxl") as writer:
-        export_df.to_excel(writer, index=False, sheet_name="Orders")
-        ws = writer.sheets["Orders"]
-        auto_width_worksheet(ws)
-
-    buf.seek(0)
-    return buf
-
-
-def build_requests_pivot_export_df(df: pd.DataFrame) -> pd.DataFrame:
-    if df.empty:
-        return pd.DataFrame(columns=["Article", "Note"])
-
-    work = df.copy()
-    work["article"] = work["article"].astype(str).fillna("")
-    work["note"] = work["note"].astype(str).fillna("")
-    work["quantity"] = pd.to_numeric(work["quantity"], errors="coerce").fillna(0).astype(int)
-    work["week"] = pd.to_numeric(work["week"], errors="coerce").astype("Int64")
-    work["year"] = pd.to_numeric(work["year"], errors="coerce").astype("Int64")
-
-    def make_yearweek(row):
-        if pd.isna(row["year"]) or pd.isna(row["week"]):
-            return None
-        return f"{int(row['year'])}{int(row['week']):02d}"
-
-    work["YearWeek"] = work.apply(make_yearweek, axis=1)
-    work = work[work["YearWeek"].notna()].copy()
-
-    if work.empty:
-        return pd.DataFrame(columns=["Article", "Note"])
-
-    pivot = work.pivot_table(
-        index=["article", "note"],
-        columns="YearWeek",
-        values="quantity",
-        aggfunc="sum",
-        fill_value=0,
-    )
-
-    if isinstance(pivot.columns, pd.MultiIndex):
-        pivot.columns = [c[-1] for c in pivot.columns]
-
-    cols_sorted = sorted([c for c in pivot.columns if c is not None], key=lambda x: int(x))
-    pivot = pivot.reindex(columns=cols_sorted)
-
-    pivot = pivot.reset_index()
-    pivot = pivot.rename(columns={
+    export_df = df.copy().rename(columns={
+        "id": "ID",
         "article": "Article",
+        "quantity": "Quantity",
+        "week": "Week",
+        "year": "Year",
         "note": "Note",
+        "supplier": "Supplier",
+        "status": "Status",
+        "created_at": "Created At",
     })
 
-    return pivot
-
-
-def requests_excel_bytes(df: pd.DataFrame) -> BytesIO:
-    buf = BytesIO()
-    export_df = build_requests_pivot_export_df(df)
+    export_df = export_df[
+        ["ID", "Article", "Quantity", "Week", "Year", "Note", "Supplier", "Status", "Created At"]
+    ]
 
     with pd.ExcelWriter(buf, engine="openpyxl") as writer:
         export_df.to_excel(writer, index=False, sheet_name="Requests")
+
         ws = writer.sheets["Requests"]
-        auto_width_worksheet(ws)
+        for column_cells in ws.columns:
+            max_length = 0
+            col_letter = column_cells[0].column_letter
+            for cell in column_cells:
+                value = "" if cell.value is None else str(cell.value)
+                max_length = max(max_length, len(value))
+            ws.column_dimensions[col_letter].width = min(max_length + 2, 35)
 
     buf.seek(0)
     return buf
@@ -262,18 +212,10 @@ def requests_excel_bytes(df: pd.DataFrame) -> BytesIO:
 # ============================================================
 user = login()
 
-if "requests_df" not in st.session_state:
-    st.session_state["requests_df"] = normalize_requests(gh_get_csv(REQ_PATH))
+if "main_list_df" not in st.session_state:
+    st.session_state["main_list_df"] = normalize_list(gh_get_csv(LIST_PATH))
 
-if "orders_df" not in st.session_state:
-    st.session_state["orders_df"] = normalize_orders(gh_get_csv(ORD_PATH))
-
-if "rejected_df" not in st.session_state:
-    st.session_state["rejected_df"] = normalize_rejected(gh_get_csv(REJ_PATH))
-
-requests_df = st.session_state["requests_df"]
-orders_df = st.session_state["orders_df"]
-rejected_df = st.session_state["rejected_df"]
+main_df = st.session_state["main_list_df"]
 
 
 # ============================================================
@@ -311,275 +253,149 @@ if st.session_state["mobile_mode"]:
 # ============================================================
 st.title("Oasis Portal")
 
-tab_requests, tab_orders, tab_rejected = st.tabs(["Requests", "Orders", "Rejected"])
+st.subheader("New Request")
 
+with st.form("new_request_form", clear_on_submit=True):
+    article = st.text_input("Article")
+    quantity = st.number_input("Quantity", min_value=1, max_value=999999, value=1, step=1)
+    week = st.number_input("Week", min_value=1, max_value=53, value=1, step=1)
+    year = st.number_input("Year", min_value=2025, max_value=2100, value=datetime.now().year, step=1)
+    note = st.text_input("Note")
 
-# ============================================================
-# REQUESTS
-# ============================================================
-with tab_requests:
-    st.subheader("New Request")
+    add_request = st.form_submit_button("Add Request", use_container_width=True)
 
-    with st.form("new_request_form"):
-        article = st.text_input("Article")
-        quantity = st.number_input("Quantity", min_value=1, max_value=999999, value=1, step=1)
-        week = st.number_input("Week", min_value=1, max_value=53, value=1, step=1)
-        year = st.number_input("Year", min_value=2025, max_value=2100, value=datetime.now().year, step=1)
-        note = st.text_input("Note")
+if add_request:
+    if not str(article).strip():
+        st.error("Article is required.")
+    else:
+        new_row = pd.DataFrame([{
+            "id": next_id(main_df),
+            "article": str(article).strip(),
+            "quantity": int(quantity),
+            "week": int(week),
+            "year": int(year),
+            "note": str(note).strip(),
+            "supplier": "",
+            "status": "New",
+            "created_at": datetime.now().isoformat(timespec="seconds"),
+        }])
 
-        add_request = st.form_submit_button("Add", use_container_width=True)
+        updated_df = pd.concat([main_df, new_row], ignore_index=True)
+        updated_df = normalize_list(updated_df)
 
-    if add_request:
-        if not str(article).strip():
-            st.error("Article needed")
+        if gh_put_csv(LIST_PATH, updated_df, "update request list"):
+            st.session_state["main_list_df"] = updated_df
+            st.success("Request added.")
+            st.rerun()
         else:
-            new_row = pd.DataFrame([{
-                "id": next_id(requests_df),
-                "article": str(article).strip(),
-                "quantity": int(quantity),
-                "week": int(week),
-                "year": int(year),
-                "note": str(note).strip(),
-                "created_at": datetime.now().isoformat(timespec="seconds")
-            }])
+            st.error("Request could not be saved to GitHub.")
 
-            new_requests_df = pd.concat([requests_df, new_row], ignore_index=True)
+st.markdown("---")
+st.subheader("Request List")
 
-            if gh_put_csv(REQ_PATH, normalize_requests(new_requests_df), "update requests"):
-                st.session_state["requests_df"] = normalize_requests(new_requests_df)
-                st.success("Request added")
+if main_df.empty:
+    st.info("No requests yet.")
+else:
+    work_df = normalize_list(main_df.copy())
+    work_df.insert(0, "select", False)
+
+    display_df = work_df.rename(columns={
+        "select": "Select",
+        "id": "ID",
+        "article": "Article",
+        "quantity": "Quantity",
+        "week": "Week",
+        "year": "Year",
+        "note": "Note",
+        "supplier": "Supplier",
+        "status": "Status",
+        "created_at": "Created At",
+    })
+
+    display_df = display_df[
+        ["Select", "ID", "Article", "Quantity", "Week", "Year", "Note", "Supplier", "Status", "Created At"]
+    ]
+
+    edited_df = st.data_editor(
+        display_df,
+        use_container_width=True,
+        hide_index=True,
+        num_rows="fixed",
+        column_config={
+            "Select": st.column_config.CheckboxColumn(required=False),
+            "ID": st.column_config.NumberColumn(disabled=True),
+            "Article": st.column_config.TextColumn(),
+            "Quantity": st.column_config.NumberColumn(min_value=1, step=1),
+            "Week": st.column_config.NumberColumn(min_value=1, max_value=53, step=1),
+            "Year": st.column_config.NumberColumn(min_value=2025, max_value=2100, step=1),
+            "Note": st.column_config.TextColumn(),
+            "Supplier": st.column_config.TextColumn(),
+            "Status": st.column_config.SelectboxColumn(
+                options=["New", "Seen", "Ordered", "Rejected"]
+            ),
+            "Created At": st.column_config.TextColumn(disabled=True),
+        },
+        key="main_editor",
+    )
+
+    c1, c2, c3 = st.columns(3)
+
+    with c1:
+        if st.button("Save Changes", use_container_width=True):
+            to_save = edited_df.drop(columns=["Select"]).rename(columns={
+                "ID": "id",
+                "Article": "article",
+                "Quantity": "quantity",
+                "Week": "week",
+                "Year": "year",
+                "Note": "note",
+                "Supplier": "supplier",
+                "Status": "status",
+                "Created At": "created_at",
+            })
+
+            to_save = normalize_list(to_save)
+
+            if gh_put_csv(LIST_PATH, to_save, "update request list"):
+                st.session_state["main_list_df"] = to_save
+                st.success("Changes saved.")
                 st.rerun()
             else:
-                st.error("Request could not be saved to GitHub.")
+                st.error("Changes could not be saved.")
 
-    st.markdown("---")
-    st.subheader("Export Requests to Excel")
+    with c2:
+        selected_ids = edited_df.loc[edited_df["Select"] == True, "ID"].tolist()
 
-    if requests_df.empty:
-        st.info("No requests available for export.")
-    else:
-        export_requests_df = requests_df.copy()
-        export_requests_df.insert(0, "Select", False)
-
-        export_requests_df = export_requests_df.rename(columns={
-            "id": "Request ID",
-            "article": "Article",
-            "quantity": "Quantity",
-            "week": "Week",
-            "year": "Year",
-            "note": "Note",
-            "created_at": "Created At",
-        })
-
-        export_requests_df = export_requests_df[
-            ["Select", "Request ID", "Article", "Quantity", "Week", "Year", "Note", "Created At"]
-        ]
-
-        edited_requests_export = st.data_editor(
-            export_requests_df,
-            use_container_width=True,
-            hide_index=True,
-            num_rows="fixed",
-            column_config={
-                "Select": st.column_config.CheckboxColumn(required=False),
-            },
-            key="requests_export_editor",
-        )
-
-        selected_request_ids = edited_requests_export.loc[
-            edited_requests_export["Select"] == True, "Request ID"
-        ].tolist()
-
-        if selected_request_ids:
-            selected_requests_df = requests_df.loc[
-                pd.to_numeric(requests_df["id"], errors="coerce").isin(selected_request_ids)
-            ].copy()
-
-            req_excel = requests_excel_bytes(selected_requests_df)
-
-            st.download_button(
-                "Export Selected Requests to Excel",
-                data=req_excel.getvalue(),
-                file_name=f"requests_export_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                use_container_width=True,
-            )
-        else:
-            st.caption("Select one or more requests to enable export.")
-
-    st.markdown("---")
-    st.subheader("Create or Reject Request")
-
-    if requests_df.empty:
-        st.info("No open requests available.")
-    else:
-        select_df = requests_df.copy()
-        select_df["label"] = select_df.apply(
-            lambda r: f"#{int(r['id'])} | {str(r['article'])} | Qty {int(r['quantity']) if pd.notna(r['quantity']) else 0} | Week {int(r['week']) if pd.notna(r['week']) else 0}",
-            axis=1,
-        )
-
-        selected_label = st.selectbox("Select request", select_df["label"].tolist(), key="request_selectbox")
-        selected_id = int(selected_label.split("|")[0].replace("#", "").strip())
-        row = select_df.loc[pd.to_numeric(select_df["id"], errors="coerce") == selected_id].iloc[0]
-
-        with st.form("create_or_reject_request_form"):
-            art = st.text_input("Article", value=str(row["article"]))
-            sup = st.text_input("Supplier")
-            qty = st.number_input("Quantity", min_value=1, max_value=999999, value=int(row["quantity"]), step=1)
-            wk = st.number_input("Week", min_value=1, max_value=53, value=int(row["week"]), step=1)
-
-            c1, c2 = st.columns(2)
-            with c1:
-                create = st.form_submit_button("Create Order", use_container_width=True)
-            with c2:
-                reject = st.form_submit_button("Reject", use_container_width=True)
-
-        if create:
-            if not str(art).strip():
-                st.error("Article needed")
-            else:
-                new_order = pd.DataFrame([{
-                    "id": next_id(orders_df),
-                    "request_id": int(row["id"]),
-                    "article": str(art).strip(),
-                    "supplier": str(sup).strip(),
-                    "quantity": int(qty),
-                    "week": int(wk),
-                    "year": int(row["year"]),
-                    "status": "Open",
-                    "created_at": datetime.now().isoformat(timespec="seconds")
-                }])
-
-                updated_orders = pd.concat([orders_df, new_order], ignore_index=True)
-                updated_requests = requests_df.loc[
-                    pd.to_numeric(requests_df["id"], errors="coerce") != int(row["id"])
-                ].copy()
-
-                ok1 = gh_put_csv(ORD_PATH, normalize_orders(updated_orders), "update orders")
-                ok2 = gh_put_csv(REQ_PATH, normalize_requests(updated_requests), "update requests")
-
-                if ok1 and ok2:
-                    st.session_state["orders_df"] = normalize_orders(updated_orders)
-                    st.session_state["requests_df"] = normalize_requests(updated_requests)
-                    st.success("Order created")
-                    st.rerun()
-                else:
-                    st.error("Order could not be saved to GitHub.")
-
-        if reject:
-            new_rejected = pd.DataFrame([{
-                "id": next_id(rejected_df),
-                "request_id": int(row["id"]),
-                "article": str(row["article"]),
-                "quantity": int(row["quantity"]),
-                "week": int(row["week"]),
-                "year": int(row["year"]),
-                "note": str(row["note"]) if pd.notna(row["note"]) else "",
-                "rejected_at": datetime.now().isoformat(timespec="seconds")
-            }])
-
-            updated_rejected = pd.concat([rejected_df, new_rejected], ignore_index=True)
-            updated_requests = requests_df.loc[
-                pd.to_numeric(requests_df["id"], errors="coerce") != int(row["id"])
-            ].copy()
-
-            ok1 = gh_put_csv(REJ_PATH, normalize_rejected(updated_rejected), "update rejected")
-            ok2 = gh_put_csv(REQ_PATH, normalize_requests(updated_requests), "update requests")
-
-            if ok1 and ok2:
-                st.session_state["rejected_df"] = normalize_rejected(updated_rejected)
-                st.session_state["requests_df"] = normalize_requests(updated_requests)
-                st.success("Request rejected")
-                st.rerun()
-            else:
-                st.error("Rejected request could not be saved to GitHub.")
-
-
-# ============================================================
-# ORDERS
-# ============================================================
-with tab_orders:
-    st.subheader("Orders")
-
-    if orders_df.empty:
-        st.info("No orders yet.")
-    else:
-        display_orders = orders_df.copy()
-        display_orders.insert(0, "Select", False)
-
-        edited_orders = st.data_editor(
-            display_orders,
-            use_container_width=True,
-            hide_index=True,
-            num_rows="fixed",
-            column_config={
-                "Select": st.column_config.CheckboxColumn(required=False),
-            },
-            key="orders_editor",
-        )
-
-        selected_ids = edited_orders.loc[edited_orders["Select"] == True, "id"].tolist()
-
-        if st.button("Delete selected", use_container_width=True):
+        if st.button("Delete Selected", use_container_width=True):
             if not selected_ids:
-                st.warning("Select at least one order.")
+                st.warning("Select at least one row.")
             else:
-                updated_orders = orders_df.loc[
-                    ~pd.to_numeric(orders_df["id"], errors="coerce").isin(selected_ids)
+                updated_df = main_df.loc[
+                    ~pd.to_numeric(main_df["id"], errors="coerce").isin(selected_ids)
                 ].copy()
+                updated_df = normalize_list(updated_df)
 
-                if gh_put_csv(ORD_PATH, normalize_orders(updated_orders), "update orders"):
-                    st.session_state["orders_df"] = normalize_orders(updated_orders)
-                    st.success("Selected orders deleted")
+                if gh_put_csv(LIST_PATH, updated_df, "delete selected rows"):
+                    st.session_state["main_list_df"] = updated_df
+                    st.success("Selected rows deleted.")
                     st.rerun()
                 else:
-                    st.error("Orders could not be deleted.")
+                    st.error("Selected rows could not be deleted.")
+
+    with c3:
+        selected_ids = edited_df.loc[edited_df["Select"] == True, "ID"].tolist()
+
+        if selected_ids:
+            export_df = main_df.loc[
+                pd.to_numeric(main_df["id"], errors="coerce").isin(selected_ids)
+            ].copy()
+        else:
+            export_df = main_df.copy()
 
         st.download_button(
-            "Export Excel",
-            data=orders_excel_bytes(normalize_orders(orders_df)),
-            file_name="orders.xlsx",
+            "Export to Excel",
+            data=excel_bytes(normalize_list(export_df)).getvalue(),
+            file_name=f"oasis_requests_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             use_container_width=True,
         )
-
-
-# ============================================================
-# REJECTED
-# ============================================================
-with tab_rejected:
-    st.subheader("Rejected")
-
-    if rejected_df.empty:
-        st.info("No rejected orders yet.")
-    else:
-        display_rejected = rejected_df.copy()
-        display_rejected.insert(0, "Select", False)
-
-        edited_rejected = st.data_editor(
-            display_rejected,
-            use_container_width=True,
-            hide_index=True,
-            num_rows="fixed",
-            column_config={
-                "Select": st.column_config.CheckboxColumn(required=False),
-            },
-            key="rejected_editor",
-        )
-
-        selected_rejected_ids = edited_rejected.loc[edited_rejected["Select"] == True, "id"].tolist()
-
-        if st.button("Delete rejected", use_container_width=True):
-            if not selected_rejected_ids:
-                st.warning("Select at least one rejected item.")
-            else:
-                updated_rejected = rejected_df.loc[
-                    ~pd.to_numeric(rejected_df["id"], errors="coerce").isin(selected_rejected_ids)
-                ].copy()
-
-                if gh_put_csv(REJ_PATH, normalize_rejected(updated_rejected), "update rejected"):
-                    st.session_state["rejected_df"] = normalize_rejected(updated_rejected)
-                    st.success("Selected rejected items deleted")
-                    st.rerun()
-                else:
-                    st.error("Rejected items could not be deleted.")
