@@ -38,43 +38,12 @@ def gh_get_text(path: str) -> Optional[str]:
 
     if r.status_code == 200:
         return base64.b64decode(r.json()["content"]).decode("utf-8", errors="ignore")
+
     if r.status_code == 404:
         return None
 
     st.error(f"GitHub read error {r.status_code}: {r.text[:300]}")
     return ""
-
-
-def gh_put_csv(path: str, df: pd.DataFrame, msg: str) -> bool:
-    url = gh_api(f"/contents/{path}")
-
-    try:
-        r = requests.get(url, headers=gh_headers(), timeout=15)
-    except Exception as e:
-        st.error(f"GitHub pre-write read failed: {e}")
-        return False
-
-    sha = r.json().get("sha") if r.status_code == 200 else None
-
-    payload = {
-        "message": msg,
-        "content": base64.b64encode(df.to_csv(index=False).encode("utf-8")).decode("ascii"),
-        "branch": "main",
-    }
-    if sha:
-        payload["sha"] = sha
-
-    try:
-        r2 = requests.put(url, headers=gh_headers(), data=json.dumps(payload), timeout=15)
-    except Exception as e:
-        st.error(f"GitHub write failed: {e}")
-        return False
-
-    if r2.status_code not in (200, 201):
-        st.error(f"GitHub write error {r2.status_code}: {r2.text[:300]}")
-        return False
-
-    return True
 
 
 def gh_get_csv(path: str) -> pd.DataFrame:
@@ -85,6 +54,61 @@ def gh_get_csv(path: str) -> pd.DataFrame:
         return pd.read_csv(StringIO(txt))
     except Exception:
         return pd.DataFrame()
+
+
+def gh_put_csv(path: str, df: pd.DataFrame, msg: str) -> bool:
+    url = gh_api(f"/contents/{path}")
+
+    payload = {
+        "message": msg,
+        "content": base64.b64encode(df.to_csv(index=False).encode("utf-8")).decode("ascii"),
+        "branch": "main",
+    }
+
+    # Eerste poging: nieuwste SHA ophalen
+    try:
+        r = requests.get(url, headers=gh_headers(), timeout=15)
+    except Exception as e:
+        st.error(f"GitHub pre-write read failed: {e}")
+        return False
+
+    if r.status_code == 200:
+        payload["sha"] = r.json().get("sha")
+
+    try:
+        r2 = requests.put(url, headers=gh_headers(), data=json.dumps(payload), timeout=15)
+    except Exception as e:
+        st.error(f"GitHub write failed: {e}")
+        return False
+
+    if r2.status_code in (200, 201):
+        return True
+
+    # Retry bij conflict
+    if r2.status_code == 409:
+        try:
+            r_retry = requests.get(url, headers=gh_headers(), timeout=15)
+        except Exception as e:
+            st.error(f"GitHub retry read failed: {e}")
+            return False
+
+        if r_retry.status_code == 200:
+            payload["sha"] = r_retry.json().get("sha")
+
+            try:
+                r3 = requests.put(url, headers=gh_headers(), data=json.dumps(payload), timeout=15)
+            except Exception as e:
+                st.error(f"GitHub retry write failed: {e}")
+                return False
+
+            if r3.status_code in (200, 201):
+                return True
+
+            st.error(f"GitHub write error {r3.status_code}: {r3.text[:300]}")
+            return False
+
+    st.error(f"GitHub write error {r2.status_code}: {r2.text[:300]}")
+    return False
 
 
 # ============================================================
@@ -193,8 +217,8 @@ def excel_bytes(df: pd.DataFrame) -> BytesIO:
 
     with pd.ExcelWriter(buf, engine="openpyxl") as writer:
         export_df.to_excel(writer, index=False, sheet_name="Requests")
-
         ws = writer.sheets["Requests"]
+
         for column_cells in ws.columns:
             max_length = 0
             col_letter = column_cells[0].column_letter
@@ -207,13 +231,17 @@ def excel_bytes(df: pd.DataFrame) -> BytesIO:
     return buf
 
 
+def refresh_main_df():
+    st.session_state["main_list_df"] = normalize_list(gh_get_csv(LIST_PATH))
+
+
 # ============================================================
 # Init
 # ============================================================
 user = login()
 
 if "main_list_df" not in st.session_state:
-    st.session_state["main_list_df"] = normalize_list(gh_get_csv(LIST_PATH))
+    refresh_main_df()
 
 main_df = st.session_state["main_list_df"]
 
@@ -268,8 +296,10 @@ if add_request:
     if not str(article).strip():
         st.error("Article is required.")
     else:
+        latest_df = normalize_list(gh_get_csv(LIST_PATH))
+
         new_row = pd.DataFrame([{
-            "id": next_id(main_df),
+            "id": next_id(latest_df),
             "article": str(article).strip(),
             "quantity": int(quantity),
             "week": int(week),
@@ -280,7 +310,7 @@ if add_request:
             "created_at": datetime.now().isoformat(timespec="seconds"),
         }])
 
-        updated_df = pd.concat([main_df, new_row], ignore_index=True)
+        updated_df = pd.concat([latest_df, new_row], ignore_index=True)
         updated_df = normalize_list(updated_df)
 
         if gh_put_csv(LIST_PATH, updated_df, "update request list"):
@@ -342,7 +372,9 @@ else:
 
     with c1:
         if st.button("Save Changes", use_container_width=True):
-            to_save = edited_df.drop(columns=["Select"]).rename(columns={
+            latest_df = normalize_list(gh_get_csv(LIST_PATH))
+
+            edited_clean = edited_df.drop(columns=["Select"]).rename(columns={
                 "ID": "id",
                 "Article": "article",
                 "Quantity": "quantity",
@@ -354,10 +386,26 @@ else:
                 "Created At": "created_at",
             })
 
-            to_save = normalize_list(to_save)
+            edited_clean = normalize_list(edited_clean)
 
-            if gh_put_csv(LIST_PATH, to_save, "update request list"):
-                st.session_state["main_list_df"] = to_save
+            # Merge op ID met nieuwste versie uit GitHub
+            if latest_df.empty:
+                merged_df = edited_clean.copy()
+            else:
+                latest_df = normalize_list(latest_df)
+                latest_df = latest_df.set_index("id")
+                edited_clean = edited_clean.set_index("id")
+
+                for idx in edited_clean.index:
+                    latest_df.loc[idx, ["article", "quantity", "week", "year", "note", "supplier", "status", "created_at"]] = \
+                        edited_clean.loc[idx, ["article", "quantity", "week", "year", "note", "supplier", "status", "created_at"]]
+
+                merged_df = latest_df.reset_index()
+
+            merged_df = normalize_list(merged_df)
+
+            if gh_put_csv(LIST_PATH, merged_df, "update request list"):
+                st.session_state["main_list_df"] = merged_df
                 st.success("Changes saved.")
                 st.rerun()
             else:
@@ -370,8 +418,10 @@ else:
             if not selected_ids:
                 st.warning("Select at least one row.")
             else:
-                updated_df = main_df.loc[
-                    ~pd.to_numeric(main_df["id"], errors="coerce").isin(selected_ids)
+                latest_df = normalize_list(gh_get_csv(LIST_PATH))
+
+                updated_df = latest_df.loc[
+                    ~pd.to_numeric(latest_df["id"], errors="coerce").isin(selected_ids)
                 ].copy()
                 updated_df = normalize_list(updated_df)
 
