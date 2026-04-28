@@ -425,11 +425,24 @@ if True:
                 st.warning("No rows selected")
 
     with action_col3:
+        # Export all visible (filtered)
         excel_file = make_excel_file(view_df)
         st.download_button(
-            label="Export Excel",
+            label="Export Excel (filtered)",
             data=excel_file,
-            file_name="oasis_requests_export.xlsx",
+            file_name="oasis_requests_filtered.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+
+    # --- EXTRA: EXPORT ONLY SELECTED ROWS ---
+    if selected_ids:
+        selected_df = view_df[view_df["ID"].isin(selected_ids)]
+        excel_selected = make_excel_file(selected_df)
+
+        st.download_button(
+            label="Export Selected to Excel",
+            data=excel_selected,
+            file_name="oasis_requests_selected.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
 
