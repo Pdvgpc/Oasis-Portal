@@ -345,11 +345,22 @@ if role == "admin" and supplier_search:
 # TABLE EDITING
 # =====================================================
 
+# Oude statussen automatisch corrigeren naar nieuwe opties
+requests_df["Status"] = requests_df["Status"].replace({
+    "Seen": "In Request",
+    "Rejected": "Denied",
+})
+view_df["Status"] = view_df["Status"].replace({
+    "Seen": "In Request",
+    "Rejected": "Denied",
+})
+
 if role == "admin":
     st.caption("Admin view: select rows, edit supplier, status, customer-code quantities, and other fields.")
 
     editor_df = view_df.copy()
-    editor_df.insert(0, "Select", False)
+    if "Select" not in editor_df.columns:
+        editor_df.insert(0, "Select", False)
 
     if mobile_mode:
         visible_columns = ["Select", "ID", "Article", "Tray Size", "Quantity", "Week", "Supplier", "Status"]
@@ -362,14 +373,14 @@ if role == "admin":
         num_rows="fixed",
         hide_index=True,
         column_config={
+            "Select": st.column_config.CheckboxColumn(
+                "Select",
+                default=False,
+            ),
             "Status": st.column_config.SelectboxColumn(
                 "Status",
                 options=STATUS_OPTIONS,
                 required=True,
-            ),
-            "Select": st.column_config.CheckboxColumn(
-                "Select",
-                default=False,
             ),
             "Quantity": st.column_config.NumberColumn("Quantity", min_value=0, step=1),
             "Tray Size": st.column_config.NumberColumn("Tray Size", min_value=0, step=1),
@@ -383,9 +394,11 @@ if role == "admin":
         key="admin_editor",
     )
 
-    col_save, col_delete, col_export = st.columns(3)
+    selected_ids = edited_df.loc[edited_df["Select"] == True, "ID"].astype(int).tolist()
 
-    with col_save:
+    action_col1, action_col2, action_col3 = st.columns(3)
+
+    with action_col1:
         if st.button("Save changes", type="primary"):
             updated_df = requests_df.copy()
 
@@ -401,19 +414,17 @@ if role == "admin":
             st.success("Changes saved")
             st.rerun()
 
-    with col_delete:
-        selected_ids = edited_df.loc[edited_df["Select"] == True, "ID"].astype(int).tolist()
-
+    with action_col2:
         if st.button("Delete selected"):
             if selected_ids:
-                requests_df = requests_df[~requests_df["ID"].isin(selected_ids)]
-                save_requests(requests_df)
+                updated_df = requests_df[~requests_df["ID"].isin(selected_ids)]
+                save_requests(updated_df)
                 st.success("Selected rows deleted")
                 st.rerun()
             else:
                 st.warning("No rows selected")
 
-    with col_export:
+    with action_col3:
         excel_file = make_excel_file(view_df)
         st.download_button(
             label="Export Excel",
