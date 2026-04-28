@@ -355,7 +355,7 @@ view_df["Status"] = view_df["Status"].replace({
     "Rejected": "Denied",
 })
 
-if role == "admin":
+if True:
     st.caption("Admin view: select rows, edit supplier, status, customer-code quantities, and other fields.")
 
     editor_df = view_df.copy()
@@ -433,29 +433,13 @@ if role == "admin":
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
 
-else:
-    st.caption("Customer view: you can add requests. Editing is disabled.")
 
-    customer_view_columns = [
-        "Article",
-        "Tray Size",
-        "Quantity",
-        "Week",
-        "Note",
-        "Status",
-    ]
-
-    st.dataframe(
-        view_df[customer_view_columns],
-        use_container_width=True,
-        hide_index=True,
-    )
 
 # =====================================================
 # EXPORT PREVIEW
 # =====================================================
 
-if role == "admin":
+if True:
     with st.expander("Excel export preview"):
         export_preview = view_df.copy()
         for col in EXPORT_COLUMNS:
