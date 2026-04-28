@@ -1,5 +1,6 @@
 import streamlit as st
 import pandas as pd
+import yaml
 from datetime import datetime
 from io import BytesIO
 from pathlib import Path
@@ -61,15 +62,35 @@ EXPORT_COLUMNS = [
 STATUS_OPTIONS = ["New", "Seen", "Ordered", "Rejected"]
 
 # =====================================================
-# OPTIONAL SIMPLE LOGIN
-# =====================================================
-# Pas dit aan naar je eigen gebruikers.
-# Role options: "admin" or "customer"
+# LOGIN VIA auth.yaml
+# Verwachte structuur:
+# credentials:
+#   usernames:
+#     pieter:
+#       name: Pieter
+#       role: admin
+#       password_plain: jouw_wachtwoord
+#     ilan:
+#       name: Ilan
+#       role: customer
+#       password_plain: klant_wachtwoord
 
-USERS = {
-    "admin": {"password": "admin123", "role": "admin"},
-    "customer": {"password": "customer123", "role": "customer"},
-}
+AUTH_FILE = Path("auth.yaml")
+
+
+def load_users_from_yaml():
+    if not AUTH_FILE.exists():
+        st.error("auth.yaml niet gevonden in de hoofdmap van je repo.")
+        st.stop()
+
+    with open(AUTH_FILE, "r", encoding="utf-8") as f:
+        config = yaml.safe_load(f)
+
+    try:
+        return config["credentials"]["usernames"]
+    except Exception:
+        st.error("auth.yaml heeft niet de juiste structuur.")
+        st.stop()
 
 
 def login():
@@ -81,6 +102,8 @@ def login():
     if st.session_state.logged_in:
         return True
 
+    users = load_users_from_yaml()
+
     st.title("🌿 Oasis Portal")
     st.subheader("Login")
 
@@ -90,11 +113,12 @@ def login():
         submitted = st.form_submit_button("Login")
 
     if submitted:
-        user = USERS.get(username)
-        if user and user["password"] == password:
+        user = users.get(username)
+
+        if user and str(user.get("password_plain", "")) == password:
             st.session_state.logged_in = True
             st.session_state.username = username
-            st.session_state.role = user["role"]
+            st.session_state.role = user.get("role", "customer")
             st.rerun()
         else:
             st.error("Incorrect username or password")
