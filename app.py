@@ -132,6 +132,26 @@ def login():
 
 
 def ensure_columns(df: pd.DataFrame) -> pd.DataFrame:
+    # --- AUTO CONVERT OLD CSV STRUCTURE ---
+    COLUMN_RENAME_MAP = {
+        "id": "ID",
+        "article": "Article",
+        "quantity": "Quantity",
+        "week": "Week",
+        "year": "Year",
+        "note": "Note",
+        "supplier": "Supplier",
+        "status": "Status",
+        "created_at": "Created At",
+    }
+
+    df = df.rename(columns=COLUMN_RENAME_MAP)
+
+    # Tray Size bestond nog niet → standaard 0
+    if "Tray Size" not in df.columns:
+        df["Tray Size"] = 0
+
+    # --- ENSURE ALL REQUIRED COLUMNS ---
     for col in INTERNAL_COLUMNS:
         if col not in df.columns:
             if col in CUSTOMER_CODES:
