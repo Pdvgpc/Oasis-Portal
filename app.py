@@ -319,21 +319,27 @@ st.divider()
 
 st.header("Request List")
 
-filter_col1, filter_col2, filter_col3 = st.columns(3)
+filter_col1, filter_col2, filter_col3, filter_col4 = st.columns(4)
 
 with filter_col1:
     status_filter = st.selectbox("Status filter", ["All"] + STATUS_OPTIONS, index=0)
 
 with filter_col2:
-    article_search = st.text_input("Search article")
+    week_filter = st.number_input("Week filter (0 = all)", min_value=0, max_value=53, value=0, step=1)
 
 with filter_col3:
+    article_search = st.text_input("Search article")
+
+with filter_col4:
     supplier_search = st.text_input("Search supplier") if role == "admin" else ""
 
 view_df = requests_df.copy()
 
 if status_filter != "All":
     view_df = view_df[view_df["Status"] == status_filter]
+
+if week_filter != 0:
+    view_df = view_df[view_df["Week"] == week_filter]
 
 if article_search:
     view_df = view_df[view_df["Article"].str.contains(article_search, case=False, na=False)]
